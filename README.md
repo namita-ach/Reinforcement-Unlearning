@@ -12,5 +12,7 @@ Particularly, to tackle the third challenge, we introduce the concept of ``envir
 Through extensive experimentation, we demonstrate the effectiveness of our proposed methods in various scenarios. 
 
 
-https://github.com/cp-lab-uts/Reinforcement-Unlearning/assets/64918395/6c898d3d-e274-4158-b6ce-1150bf2e2a5a
+
+
+https://github.com/cp-lab-uts/Reinforcement-Unlearning/assets/64918395/673ae1ff-5481-4eb2-9c80-663a2c481375
 

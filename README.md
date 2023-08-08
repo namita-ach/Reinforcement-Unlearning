@@ -10,3 +10,7 @@ To tackle these challenges, we propose two reinforcement unlearning methods. The
 The second method leverages environment poisoning attacks, which encourages the agent to learn new, albeit incorrect, knowledge to remove the unlearning environment. 
 Particularly, to tackle the third challenge, we introduce the concept of ``environment reconstruction inference'' to evaluate the reinforcement unlearning outcomes. 
 Through extensive experimentation, we demonstrate the effectiveness of our proposed methods in various scenarios. 
+
+
+https://github.com/cp-lab-uts/Reinforcement-Unlearning/assets/64918395/6c898d3d-e274-4158-b6ce-1150bf2e2a5a
+

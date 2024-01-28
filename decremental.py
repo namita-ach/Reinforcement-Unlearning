@@ -1,3 +1,4 @@
+import sys
 import numpy as np
 import gym
 from gym import spaces
@@ -6,6 +7,18 @@ import torch.nn as nn
 from collections import deque
 import random
 import json
+import torch.nn.functional as F
+import pickle
+from tqdm import tqdm
+
+# seed = 3
+# torch.manual_seed(seed)
+# np.random.seed(seed)
+# random.seed(seed)
+
+unlearn_epoch = int(sys.argv[1])
+n_maps = 20
+game_type = "grid_world"
 
 class ReplayBuffer():
     def __init__(self, capacity):
@@ -111,29 +124,37 @@ class Simple2DEnvironment(gym.Env):
         state = np.insert(state, 0, self.state)
         return state, reward, done, {}
 
-    def reset(self, map_index=None):
+    def reset(self, map_index=None,game_type = "grid_world"):
         if map_index is None:
-
-            self.state = (int(self.size/2), self.size-1)
-
-            self.target = (int(self.size/2), 0) 
-
             # create or load your own map and environment
+            if game_type == "grid_world":
+                self.state = (int(self.size / 2), self.size - 1)  # Middle Bottom
+                self.target = (int(self.size / 2), 0)  # Middle Top
 
+                self.obstacles = [(np.random.randint(1, self.size-1), np.random.randint(1, self.size-1)) for _ in range(self.n_ob)]
+                self.obstacles += [(i, -1) for i in range(self.size+2)] # Top
+                self.obstacles += [(i, self.size) for i in range(self.size+2)] # Bottom
+                self.obstacles += [(-1, i) for i in range(-1, self.size+1)] # Left
+                self.obstacles += [(self.size, i) for i in range(-1, self.size+1)] # Right
 
+                map_data = {"obstacles": self.obstacles, "target": self.target}
+                self.maps.append(map_data)
+            elif game_type == "aircraft_landing":
+                self.state = (np.random.randint(self.size), self.size - 1)
+                self.target = (np.random.randint(self.size), 0)
 
-            self.obstacles += [(i, -1) for i in range(self.size+2)]
-            self.obstacles += [(i, self.size) for i in range(self.size+2)]
-            self.obstacles += [(-1, i) for i in range(-1, self.size+1)]
-            self.obstacles += [(self.size, i) for i in range(-1, self.size+1)]
+                self.obstacles = [(np.random.randint(self.size), np.random.randint(self.size)) for _ in range(10)]
+                self.obstacles += [(i, -1) for i in range(self.size+2)] # Top
+                self.obstacles += [(i, self.size) for i in range(self.size+2)] # Bottom
+                self.obstacles += [(-1, i) for i in range(-1, self.size+1)] # Left
+                self.obstacles += [(self.size, i) for i in range(-1, self.size+1)] # Right
 
-            # save maps
-            map_data = {"obstacles": self.obstacles, "target": self.target}
-            self.maps.append(map_data)
+                map_data = {"obstacles": self.obstacles, "target": self.target}
+                self.maps.append(map_data)
         else:
             # if map index is provided, load it
             map_data = self.maps[map_index]
-            self.state = (int(self.size/2), self.size-1)
+            self.state = (int(self.size/2), self.size-1) if game_type == "grid_world" else (np.random.randint(self.size), self.size - 1)
             self.target = map_data['target']
             self.obstacles = map_data['obstacles']
 
@@ -212,15 +233,24 @@ class DQNAgent():
 
     def get_action(self, state, epsilon=0.1):
         if random.random() < epsilon:
-            return random.randrange(self.action_dim)
+            return random.randrange(self.action_dim), epsilon*(0.75/0.25)
         state   = torch.FloatTensor(state).unsqueeze(0).to(device)
         q_value = self.model.forward(state)
-        return q_value.max(1)[1].data[0]
+        probabilities = F.softmax(q_value).squeeze(0).tolist()
+        action = q_value.max(1)[1].data[0].item()
+        return q_value.max(1)[1].data[0], (1-epsilon)*((1-probabilities[action])/probabilities[action])
 
-    
+'''
+Normal Model
+'''
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    
+
 env = Simple2DEnvironment(10,10)
+'''
+Load Map
+'''
+env.load_maps(f"map_data/{game_type}/maps.json")
+
 state_dim  = env.observation_space.shape[0]
 action_dim = env.action_space.n
 buffer = ReplayBuffer(1000)
@@ -231,6 +261,10 @@ batch_size = 32
 epsilon = 1.0
 rewards = []    
 
+'''
+Training Normal Model
+'''
+print("Training Normal Model")
 map_id = -1
 all_step = 0
 steps = 0 
@@ -238,41 +272,39 @@ n_episodes = 1000
 n_maps = 20
 each_map = n_episodes/n_maps
 total_reward = 0
-for i_episode in range(n_episodes):
+for i_episode in tqdm(range(n_episodes)):
     all_step = all_step + steps
     if i_episode%each_map ==0 :
-        state = env.reset()
         map_id = map_id + 1
-        #print(all_step/each_map)
-        
+        state = env.reset(map_index=map_id)
+
         all_step = 0
         epsilon = 1.0
         total_reward = 0
-        #env.render()
     else:
-
         state = env.reset(map_index=map_id)
     done = False
     steps = 0  
-    #print(i_episode)
-    while not done and steps < 200:  
-        #action = agent.get_action(state, epsilon)
-        #print(state)
-        action = agent.get_action(state, epsilon)
+    while not done and steps < 200:
+        action,_ = agent.get_action(state, epsilon)
         next_state, reward, done, _ = env.step(action)
-        if map_id != 0:
-            buffer.push(state, action, reward, next_state, done)
-            agent.update(batch_size)
+        buffer.push(state, action, reward, next_state, done)
+        agent.update(batch_size)
         total_reward += reward
         state = next_state
-        steps += 1  
+        steps += 1
 
     if (i_episode+1)%each_map ==0 :
         print(f'Map {map_id} Reward: {total_reward/each_map} steps: {all_step/each_map}')
     rewards.append(total_reward)
     epsilon *= 0.995
 
-
+'''
+Test Normal Model
+'''
+print("Testing Normal Model")
+r_truth_normal = []
+previous_r_truth_normal_sum = 0
 map_id = -1
 all_step = 0
 # test
@@ -282,33 +314,32 @@ n_maps = 20
 each_map = n_episodes/n_maps
 total_reward = 0
 epsilon = 0
-rewards = []
-print('test')
-for i_episode in range(n_episodes):
+rewards_normal = []
+for i_episode in tqdm(range(n_episodes)):
     all_step = all_step + steps
-    if i_episode%each_map ==0 :
+    if i_episode%each_map ==0:
         map_id = map_id + 1
         state = env.reset(map_index=map_id)
 
         all_step = 0
         epsilon = 1.0
         total_reward = 0
-        #env.render()
     else:
         state = env.reset(map_index=map_id)
         
     done = False
     steps = 0 
-    #print(i_episode)
-    while not done and steps < 100:  
+    previous_r_truth_normal_sum = 0
+    while not done and steps < 100:
 
-        action = agent.get_action(state, epsilon=0.05) 
+        action,r_truth = agent.get_action(state, epsilon=0.05)
         next_state, reward, done, _ = env.step(action)
         total_reward += reward
+        previous_r_truth_normal_sum += r_truth
         state = next_state
         steps += 1
-    rewards.append(total_reward)
-    #print(steps)
+    rewards_normal.append(total_reward)
+    r_truth_normal.append(previous_r_truth_normal_sum/3)
     if (i_episode+1)%each_map ==0 :
         print(f'Map {map_id} Reward: {total_reward/each_map} steps: {all_step/each_map}')
 
@@ -324,49 +355,51 @@ def shuffle_three_parts(lst,change):
     for i, index in enumerate(sorted(chosen_indices)):
         lst_new[index] = lst[chosen_indices[i]]
 
-    return lst_new    
+    return lst_new
 
+'''
+Unlearning Model
+'''
+print("Training Unlearning Model")
+env.maps.clear()
 map_id = -1
 all_step = 0
 # unlearning
-steps = 0 
-n_episodes = 200
+steps = 0
+n_episodes = unlearn_epoch * n_maps # epoch = 10, should change to 200 400 600 800 1000
 n_maps = 20
 each_map = n_episodes/n_maps
 total_reward = 0
-print('unlearning')
-for i_episode in range(n_episodes):
+for i_episode in tqdm(range(n_episodes)):
     all_step = all_step + steps
     if i_episode%each_map ==0 :
-        state = env.reset()
         map_id = map_id + 1
-        #print(all_step/each_map)
-        
+        state = env.reset() if game_type == "grid_world" else env.reset(None,"aircraft_landing")
+
         all_step = 0
         epsilon = 1.0
         total_reward = 0
-        #env.render()
     else:
 
         state = env.reset(map_index=map_id)
     done = False
-    steps = 0 
-    while not done and steps < 100: 
+    steps = 0
+    while not done and steps < 100:
 
         if map_id == 0:
-            action = agent.get_action(state, 1)
+            action,_ = agent.get_action(state, 1)
             next_state, reward, done, _ = env.step(action)
             buffer.push(state, action, reward, next_state, done)
             agent.update(batch_size)
         else:
-            action = agent.get_action(state, epsilon)
+            action,_ = agent.get_action(state, epsilon)
             next_state, reward, done, _ = env.step(action)
             buffer.push(state, action, reward, next_state, done)
 
             agent.update(batch_size)
         total_reward += reward
         state = next_state
-        steps += 1  
+        steps += 1
 
     if (i_episode+1)%each_map ==0 :
         print(f'Map {map_id} Reward: {total_reward/each_map} steps: {all_step/each_map}')
@@ -374,7 +407,13 @@ for i_episode in range(n_episodes):
     epsilon *= 0.995
 
 
-    
+'''
+Unlearning Testing
+'''
+print("Testing Unlearning Model")
+env.load_maps(f"map_data/{game_type}/maps.json")
+r_truth_unlearn = []
+previous_r_truth_unlearn_sum = 0
 map_id = -1
 all_step = 0
 
@@ -384,32 +423,153 @@ n_maps = 20
 each_map = n_episodes/n_maps
 total_reward = 0
 epsilon = 0
-rewards = []
-print('test')
-for i_episode in range(n_episodes):
+rewards_unlearning = []
+# print('test')
+for i_episode in tqdm(range(n_episodes)):
     all_step = all_step + steps
     if i_episode%each_map ==0 :
         map_id = map_id + 1
         state = env.reset(map_index=map_id)
-        
+
         all_step = 0
         epsilon = 1.0
         total_reward = 0
-        #env.render()
     else:
         state = env.reset(map_index=map_id)
-        
-    done = False
-    steps = 0  
 
-    while not done and steps < 100:  
-        action = agent.get_action(state, epsilon=0.05) 
+    done = False
+    steps = 0
+    previous_r_truth_unlearn_sum = 0
+    while not done and steps < 100:
+        action,r_truth = agent.get_action(state, epsilon=0.05)
         next_state, reward, done, _ = env.step(action)
         total_reward += reward
+        previous_r_truth_unlearn_sum+=r_truth
         state = next_state
-        steps += 1  
-    rewards.append(total_reward)
+        steps += 1
+    rewards_unlearning.append(total_reward)
+    r_truth_unlearn.append(previous_r_truth_unlearn_sum/3)
 
     if (i_episode+1)%each_map ==0 :
         print(f'Map {map_id} Reward: {total_reward/each_map} steps: {all_step/each_map}')
 
+
+'''
+Note: During unlearn model training process, we will comment the code to save time 
+Different training unlearned model epoch will have the same retain result,therefore we can comment the code below
+'''
+
+# '''
+# Retain Model
+# '''
+# print("Training Retain Model")
+# env = Simple2DEnvironment(10, 10)
+# env.load_maps(f"map_data/{game_type}/maps.json")
+# state_dim = env.observation_space.shape[0]
+# action_dim = env.action_space.n
+# buffer = ReplayBuffer(1000)
+# agent = DQNAgent(state_dim, action_dim, buffer)
+#
+# episodes = 1000
+# batch_size = 32
+# epsilon = 1.0
+# rewards = []
+#
+# '''
+# Retain Training - exclude first env
+# '''
+# map_id = -1
+# all_step = 0
+# steps = 0
+# n_episodes = 1000
+# n_maps = 20
+# each_map = n_episodes / n_maps
+# total_reward = 0
+# for i_episode in tqdm(range(n_episodes)):
+#     all_step = all_step + steps
+#     if i_episode % each_map == 0:
+#
+#         map_id = map_id + 1
+#         state = env.reset(map_index=map_id)
+#
+#         all_step = 0
+#         epsilon = 1.0
+#         total_reward = 0
+#     else:
+#
+#         state = env.reset(map_index=map_id)
+#     done = False
+#     steps = 0
+#     while not done and steps < 200:
+#         action,_ = agent.get_action(state, epsilon)
+#         next_state, reward, done, _ = env.step(action)
+#         if map_id != 0:
+#             buffer.push(state, action, reward, next_state, done)
+#             agent.update(batch_size)
+#         total_reward += reward
+#         state = next_state
+#         steps += 1
+#
+#     if (i_episode + 1) % each_map == 0:
+#         print(f'Map {map_id} Reward: {total_reward / each_map} steps: {all_step / each_map}')
+#     rewards.append(total_reward)
+#     epsilon *= 0.995
+#
+# '''
+# Retain Test
+# '''
+# print("Testing Retain Model")
+# r_truth_retain = []
+# previous_r_truth_retain_sum = 0
+# map_id = -1
+# all_step = 0
+# steps = 0
+# n_episodes = 1000
+# n_maps = 20
+# each_map = n_episodes / n_maps
+# total_reward = 0
+# epsilon = 0
+# rewards_retain = []
+# for i_episode in tqdm(range(n_episodes)):
+#     all_step = all_step + steps
+#     if i_episode % each_map == 0:
+#         map_id = map_id + 1
+#         state = env.reset(map_index=map_id)
+#
+#         all_step = 0
+#         epsilon = 1.0
+#         total_reward = 0
+#         # env.render()
+#     else:
+#         state = env.reset(map_index=map_id)
+#
+#     done = False
+#     steps = 0
+#     previous_r_truth_retain_sum = 0
+#     while not done and steps < 100:
+#         action,r_truth = agent.get_action(state, epsilon=0.05)
+#         next_state, reward, done, _ = env.step(action)
+#         total_reward += reward
+#         # epoch_reward+=reward
+#         previous_r_truth_retain_sum += r_truth
+#         state = next_state
+#         steps += 1
+#     rewards_retain.append(total_reward)
+#     r_truth_retain.append(previous_r_truth_retain_sum/3)
+#     if (i_episode + 1) % each_map == 0:
+#         print(f'Map {map_id} Reward: {total_reward / each_map} steps: {all_step / each_map}')
+
+# Note: s3 refers to seed 3, s3 used to be the best seed but now we are not using the seed
+'''
+dump r_truth
+'''
+# pickle.dump(r_truth_normal,open(f"s3-dec-RTruth-Normal.pkl","wb"))
+pickle.dump(r_truth_unlearn,open(f"s3-dec-RTruth-Unlearn-epoch-{unlearn_epoch}.pkl","wb"))
+# pickle.dump(r_truth_retain,open(f"s3-dec-RTruth-Retain.pkl","wb"))
+
+'''
+dump reward
+'''
+# pickle.dump(rewards_normal,open(f"s3-dec-cRewards-Normal.pkl","wb"))
+pickle.dump(rewards_unlearning,open(f"s3-dec-cRewards-Unlearn-epoch-{unlearn_epoch}.pkl","wb"))
+# pickle.dump(rewards_retain, open(f"s3-dec-cRewards-Retain.pkl", "wb"))
